@@ -4,7 +4,7 @@ import requests
 from bs4 import BeautifulSoup
 import json
 import time
-# test
+
 # 使用する文字セット
 chars = string.ascii_lowercase + string.digits + '-_'
 
