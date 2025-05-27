@@ -11,6 +11,7 @@ class LivePocketGUI:
         self.root = root
         self.root.title("LivePocket URL Checker")
         self.csv_path = tk.StringVar()
+        self.mode = tk.StringVar(value="normal")  # normal / tor / auto
 
         # ファイル選択
         tk.Label(root, text="CSVファイル:").pack(anchor='w')
@@ -19,22 +20,30 @@ class LivePocketGUI:
         tk.Entry(frame, textvariable=self.csv_path, width=50).pack(side='left', fill='x', expand=True)
         tk.Button(frame, text="参照", command=self.select_csv).pack(side='left', padx=5)
 
-        # 実行ボタンと停止ボタン
+        # モード選択
+        tk.Label(root, text="実行モード:").pack(anchor='w', padx=5)
+        mode_frame = tk.Frame(root)
+        mode_frame.pack(anchor='w', padx=15)
+        tk.Radiobutton(mode_frame, text="通常モード", variable=self.mode, value="normal").pack(anchor='w')
+        tk.Radiobutton(mode_frame, text="Tor接続モード", variable=self.mode, value="tor").pack(anchor='w')
+        tk.Radiobutton(mode_frame, text="自動切り替えモード", variable=self.mode, value="auto").pack(anchor='w')
+
+        # 実行と停止
         button_frame = tk.Frame(root)
         button_frame.pack(pady=10)
         tk.Button(button_frame, text="▶ スキャン実行", command=self.run_scan).pack(side='left', padx=10)
         tk.Button(button_frame, text="⏹ 停止", command=self.stop_scan).pack(side='left')
 
-        # ログ表示
+        # ログ出力
         self.log = scrolledtext.ScrolledText(root, height=20)
         self.log.pack(fill='both', expand=True, padx=5, pady=5)
         self.log.insert(tk.END, "LivePocket URL チェックツール\n")
 
-        # ステータス表示
+        # ステータス
         self.status_label = tk.Label(root, text="🔲 待機中", anchor='w', fg='blue')
         self.status_label.pack(fill='x', padx=5, pady=(0, 2))
 
-        # 実行時間表示
+        # 実行時間
         self.time_label = tk.Label(root, text="実行時間: 0.0秒", anchor='w', fg='gray')
         self.time_label.pack(fill='x', padx=5, pady=(0, 2))
 
@@ -67,7 +76,7 @@ class LivePocketGUI:
         self.update_timer()
         self.progress.start()
 
-        threading.Thread(target=self.run_async_task, args=(csv_file,), daemon=True).start()
+        threading.Thread(target=self.run_async_task, args=(csv_file, self.mode.get()), daemon=True).start()
 
     def stop_scan(self):
         if self.process and self.process.poll() is None:
@@ -76,7 +85,8 @@ class LivePocketGUI:
             self.status_label.config(text="⏹ 停止", fg='red')
             self.timer_running = False
             self.progress.stop()
-
+            if self.pause:
+                self.resume_from_pause()  # 制限待機解除
     def update_timer(self):
         if self.timer_running:
             elapsed = time.time() - self.start_time
@@ -89,7 +99,7 @@ class LivePocketGUI:
         self.pause = False
         self.pause_log = False
 
-    def run_async_task(self, csv_file):
+    def run_async_task(self, csv_file, mode):
         script_path = os.path.abspath("Pokemon_LivePocket_URL_Checker.py")
         if not os.path.exists(script_path):
             self.log.insert(tk.END, f"❌ スクリプトが見つかりません\n")
@@ -99,8 +109,10 @@ class LivePocketGUI:
             return
 
         try:
+            args = ["python", script_path, "--csv", csv_file, "--mode", mode]
+
             self.process = subprocess.Popen(
-                ["python", script_path, "--csv", csv_file],
+                args,
                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True
             )
             for line in self.process.stdout:

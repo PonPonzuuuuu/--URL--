@@ -1,50 +1,59 @@
-import aiohttp
+# LivePocket URL チェッカー（並列非同期処理 + モード切替対応）
+# モード: normal / tor / auto
+# normal: aiohttp 並列非同期（アクセス制限検出時は5分待機）
+# tor: requests + PySocks 逐次（アクセス制限検出時は5分待機）
+# auto: 状況に応じて normal ↔ tor を自動切り替え（待機なし、切替時にログ表示）
+
+import argparse
 import asyncio
-import aiofiles
 import csv
 import json
-from bs4 import BeautifulSoup
-import os
-import time
-import argparse
-from datetime import datetime
 import os
 import re
+import time
+from datetime import datetime
+from bs4 import BeautifulSoup
+import aiohttp
+import aiofiles
+import requests
+from requests.exceptions import RequestException
+import subprocess
+import psutil
 
-# 引数処理
+# ログ出力関数（flush=True により即時反映される）
+def log(*args, **kwargs):
+    print(*args, **kwargs, flush=True)
+
+# 引数処理（--csv と --mode を受け取る）
 parser = argparse.ArgumentParser(description="LivePocket URL Checker")
 parser.add_argument('--csv', type=str, default='index.csv', help='CSVファイル名（例: index_000.csv）')
+parser.add_argument('--mode', type=str, choices=['normal', 'tor', 'auto'], default='normal', help='実行モード: normal / tor / auto')
 args = parser.parse_args()
 csv_file = args.csv
+mode = args.mode
 
-# 出力フォルダ指定
-SAVE_DIR = 'save'
-RESULT_DIR = 'Result'
+# 非同期HTTPクライアントの最大同時リクエスト数
+CONCURRENT_REQUESTS = 10
+
+# 保存ディレクトリ設定
+SAVE_DIR = 'save'  # アクセス済みURLのログ
+RESULT_DIR = 'Result'  # HITしたURL情報の保存先
 os.makedirs(SAVE_DIR, exist_ok=True)
 os.makedirs(RESULT_DIR, exist_ok=True)
 
-# CSVファイル名から番号だけ抽出して出力ファイル名に反映
+# 結果ファイル名の構築（ファイル名のサフィックス取得）
 base_name = os.path.basename(csv_file)
 match = re.search(r'_(\d{3})\.csv$', base_name)
 suffix = match.group(1) if match else 'default'
 RESULT_FILE = os.path.join(RESULT_DIR, f'pokemon_livepocket_urls_{suffix}.json')
-
-# 巡回済みURL置き場
 ACCESSED_FILE = os.path.join(SAVE_DIR, 'accessed_url.json')
 
-# LivePokectのURL
+# チェック対象のURL基本パスとキーワード
 BASE_URL = 'https://t.livepocket.jp/e/'
+keywords = ['ポケモン', 'ポケモンカード', 'ポケモンカードゲーム', 'ポケカ', 'ブラックボルト', 'ホワイトフレア']
+block_keywords = ['不正', 'エラー', '制限']
 
-# アクセス設定
-CONCURRENT_REQUESTS = 3 # タスク数
-RATE_LIMIT_PER_SEC = 3 # 通常モードは1秒に"RATE_LIMIT_PER_SEC"件まで
-BURST_INTERVAL_SEC = 100000 # バーストモード発動までのインターバル秒数(バーストモードいらなくね？)
-BURST_SIZE = 10 # バーストモード時の最大アクセス数
-
-keywords = ['ポケモン', 'ポケモンカード', 'ポケモンカードゲーム', 'ポケカ', 'ブラックボルト', 'ホワイトフレア'] # 監視ワード
-block_keywords = ['不正', 'エラー', '制限'] # アクセス制限監視ワード
-
-# ブラウザのふりをしとかないと403でアクセス不可
+# HTTPリクエスト用ヘッダー（User-Agent 偽装）
 headers = {
     'User-Agent': (
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 '
@@ -52,146 +61,220 @@ headers = {
     )
 }
 
-# ログ出力関数
-def log(*args, **kwargs):
-    print(*args, **kwargs, flush=True)
+# Tor経由アクセス用のプロキシ設定
+TOR_PROXY = {
+    'http': 'socks5h://127.0.0.1:9050',
+    'https': 'socks5h://127.0.0.1:9050'
+}
 
-class RateLimiter:
-    def __init__(self, rate_per_sec, burst_interval_sec, burst_size):
-        self._interval = 1.0 / rate_per_sec
-        self._last_request_time = time.monotonic()
-        self._last_burst_time = 0
-        self._burst_interval = burst_interval_sec
-        self._burst_size = burst_size
-        self._burst_remaining = 0
+# CSVインデックス読み込み関数
+def load_indexs(path):
+    # index列をすべて読み込んでリストで返す
+    with open(path, 'r', encoding='utf-8') as f:
+        return [row['index'] for row in csv.DictReader(f)]
 
-    async def wait(self):
-        now = time.monotonic()
-        if now - self._last_burst_time >= self._burst_interval:
-            self._last_burst_time = now
-            self._burst_remaining = self._burst_size
-            # log(f"バーストモード")
-
-        if self._burst_remaining > 0:
-            self._burst_remaining -= 1
-            return
-
-        wait_time = self._last_request_time + self._interval - now
-        if wait_time > 0:
-            await asyncio.sleep(wait_time)
-        self._last_request_time = time.monotonic()
-
-# 辞書ロード
-def load_indexs(csv_file):
-    with open(csv_file, 'r', encoding='utf-8') as f:
-        reader = csv.DictReader(f)
-        return [row['index'] for row in reader]
-
-
-# Jsonのロード　例えばアクセス済みJson(中断用)
+# JSONファイル読み込み関数
 def load_json(path):
+    # ファイルが存在する場合、JSONデータを読み込んで返す
     if os.path.exists(path):
         with open(path, 'r', encoding='utf-8') as f:
             return json.load(f)
     return []
 
-#Json保存
+# JSONファイル保存関数（非同期）
 async def save_json(path, data):
+    # JSONをファイルに保存する
     async with aiofiles.open(path, 'w', encoding='utf-8') as f:
         await f.write(json.dumps(data, ensure_ascii=False, indent=2))
 
-# アクセス処理
-async def process_index(session, index, results, accessed, limiter, is_waiting):
-    await is_waiting.wait()  # 待機中なら全タスクここでブロックされる
-    await limiter.wait()
+# Tor経由で単一URLにアクセスする処理（同期）
+def process_tor(index, auto_mode):
     url = BASE_URL + index
-    log(f"アクセス中: ", url)
+    log(f"アクセス中 (Tor): {url}")
     try:
-        async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=5)) as response:
-            if response.status == 200:
-                html = await response.text()
-                soup = BeautifulSoup(html, 'html.parser')
-                title = soup.title.get_text(strip=True) if soup.title else ''
-
-                # アクセス制限検知
-                if any(block_word in title for block_word in block_keywords):
-                    is_waiting.clear()
-                    log(f"アクセス制限検出: ", url)
-                    log(f"5分間待機します...")
+        response = requests.get(url, headers=headers, proxies=TOR_PROXY, timeout=30)
+        if response.status_code == 200:
+            html = response.text
+            soup = BeautifulSoup(html, 'html.parser')
+            title = soup.title.get_text(strip=True) if soup.title else ''
+            # アクセス制限ワードを含むかチェック
+            if any(b in title for b in block_keywords):
+                log(f"アクセス制限検出: {url}")
+                if not auto_mode:
                     log("[GUI_WAIT_300]")
-                    await asyncio.sleep(300)
-                    is_waiting.set()  # 復帰
-                    return False  # 処理失敗（accessedに入れない）
+                    time.sleep(300)
+                return False, title
+            # HITワードが含まれていた場合は成功として返す
+            if any(k in title for k in keywords):
+                log("HIT", title, url)
+                return True, title
+    except RequestException as e:
+        log(f"[警告] Tor接続エラー: {e}")
+    return True, None
 
-                # HITしたURL
-                if any(keyword in title for keyword in keywords):
-                    results.append({'url': url, 'title': title})
-                    log("HIT", title , url)
+# aiohttpで非同期にアクセスする処理
+async def process_http(index, session, semaphore, auto_mode):
+    url = BASE_URL + index
+    async with semaphore:
+        log(f"アクセス中 (通常): {url}")
+        try:
+            async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as response:
+                if response.status == 200:
+                    html = await response.text(errors='ignore')
+                    soup = BeautifulSoup(html, 'html.parser')
+                    title = soup.title.get_text(strip=True) if soup.title else ''
+                    if any(b in title for b in block_keywords):
+                        log(f"アクセス制限検出: {url}")
+                        if not auto_mode:
+                            log("[GUI_WAIT_300]")
+                            await asyncio.sleep(300)
+                        return index, False, title
+                    if any(k in title for k in keywords):
+                        log("HIT", title, url)
+                        return index, True, title
+        except Exception as e:
+            log(f"[警告] 通常接続エラー: {e}")
+    return index, True, None
 
-    except:
-        pass  # 通信失敗などは無視
-
-    accessed.add(index)  # 無条件で記録
-    return True
-
-# メイン処理
+# メイン関数
 async def main():
-
-    is_waiting = asyncio.Event()
-    is_waiting.set()  # 通常時はアクセス許可
-
+    # 処理の開始時刻を記録（統計出力用）
     start_time = datetime.now()
 
+    # Torモードの初回起動フラグとプロセス保持
+    tor_started = False
+    tor_process = None
+
+    # インデックスCSVからURL識別子を取得
     indexs = load_indexs(csv_file)
 
+    # 過去にアクセスしたURL一覧とHIT結果を読み込む
     accessed = set(load_json(ACCESSED_FILE))
     results = load_json(RESULT_FILE)
-    pending = [index for index in indexs if index not in accessed]
-    limiter = RateLimiter(RATE_LIMIT_PER_SEC, BURST_INTERVAL_SEC, BURST_SIZE)
-    # cancel_event = asyncio.Event()
+
+    # 未アクセスのインデックスのみ抽出
+    pending = [idx for idx in indexs if idx not in accessed]
 
     log(f"未処理: {len(pending):,} 件を処理開始")
 
-    async with aiohttp.ClientSession() as session:
-        async def runner(index):
-            success = await process_index(session, index, results, accessed, limiter, is_waiting)
-            return (index, success)
+    tor_mode = (mode == 'tor')  # Tor専用モードか？
+    auto_mode = (mode == 'auto')  # 自動切替モードか？
+    use_tor = tor_mode  # 現在の接続モード（初期は引数に従う）
+    tor_start_time = None  # Torモードに切り替えた時刻を記録
 
-        try:
-            tasks = [runner(index) for index in pending]
-            while pending:
-                chunk = [pending.pop(0) for _ in range(min(CONCURRENT_REQUESTS, len(pending)))]
-                results_chunk = await asyncio.gather(*[runner(index) for index in chunk])
+    try:
+        # Torモードの初回時または自動モードの初回時に Tor を起動
+        if (tor_mode or auto_mode) and not tor_started:
+            tor_exe_path = os.path.join('tor', 'tor', 'tor.exe')
+            if os.path.exists(tor_exe_path):
+                log("Torプロセスを起動中...")
+                tor_process = subprocess.Popen([tor_exe_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                tor_started = True
+                time.sleep(20)  # Tor が起動して接続するのを待つ
+                log("Torプロセス起動しました！")
+            else:
+                log("[警告] Tor 実行ファイルが見つかりません: tor/tor/tor.exe")
 
-                retry_indices = [index for index, success in results_chunk if not success]
-                if retry_indices:
-                    log(f"アクセス制限されたURLをキューの最後尾に追加：{retry_indices}")
-                    pending.extend(retry_indices)
-
-                await save_json(ACCESSED_FILE, list(accessed))
+        if tor_mode:
+            for index in pending:
+                success, title = process_tor(index, auto_mode)
+                accessed.add(index)
+                if title:
+                    results.append({'url': BASE_URL + index, 'title': title})
+                with open(ACCESSED_FILE, 'w', encoding='utf-8') as f:
+                    json.dump(list(accessed), f, ensure_ascii=False, indent=2)
                 if results:
-                    await save_json(RESULT_FILE, results)
+                    with open(RESULT_FILE, 'w', encoding='utf-8') as f:
+                        json.dump(results, f, ensure_ascii=False, indent=2)
 
+        else:
+            semaphore = asyncio.Semaphore(CONCURRENT_REQUESTS)
+            async with aiohttp.ClientSession() as session:
+                i = 0
+                while i < len(pending):
+                    chunk = pending[i:i + CONCURRENT_REQUESTS]
+                    results_batch = []
+                    switch_mode = False  # モード切替のフラグ
+                    retry_queue = []  # 再試行対象
+
+                    if auto_mode and use_tor and tor_start_time:
+                        if (datetime.now() - tor_start_time).total_seconds() > 300:
+                            log("[自動切替] Torモード5分経過 → 通常モードに戻ります")
+                            use_tor = False
+                            tor_start_time = None
+
+                    if auto_mode and use_tor:
+                        for idx in chunk:
+                            success, title = process_tor(idx, auto_mode)
+                            if title:
+                                results.append({'url': BASE_URL + idx, 'title': title})
+                            if success:
+                                accessed.add(idx)
+                            else:
+                                retry_queue.append(idx)
+                                use_tor = False
+                                switch_mode = True
+                                tor_start_time = None
+                    else:
+                        tasks = [process_http(idx, session, semaphore, auto_mode) for idx in chunk]
+                        results_batch = await asyncio.gather(*tasks)
+                        for idx, success, title in results_batch:
+                            if title:
+                                results.append({'url': BASE_URL + idx, 'title': title})
+                            if success:
+                                accessed.add(idx)
+                            elif auto_mode:
+                                retry_queue.append(idx)
+                                use_tor = True
+                                tor_start_time = datetime.now()
+                                switch_mode = True
+
+                    await save_json(ACCESSED_FILE, list(accessed))
+                    if results:
+                        await save_json(RESULT_FILE, results)
+
+                    if auto_mode and switch_mode and retry_queue:
+                        log("切り替え後、再試行を実行中...")
+                        for retry_index in retry_queue:
+                            if use_tor:
+                                success, title = process_tor(retry_index, auto_mode)
+                            else:
+                                retry_result = await process_http(retry_index, session, semaphore, auto_mode)
+                                retry_index, success, title = retry_result
+                            if title:
+                                results.append({'url': BASE_URL + retry_index, 'title': title})
+                            if success:
+                                accessed.add(retry_index)
+                        await save_json(ACCESSED_FILE, list(accessed))
+                        await save_json(RESULT_FILE, results)
+                        retry_queue.clear()
+
+                    i += CONCURRENT_REQUESTS
+
+        # 統計出力
+        end_time = datetime.now()
+        duration = (end_time - start_time).total_seconds()
+        total_hits = len(results)
+
+        log("\n==============実行統計==============")
+        log(f"開始時刻: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        log(f"終了時刻: {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
+        log(f"処理時間: {duration:.2f} 秒（約 {duration / 60:.1f} 分）")
+        log(f"HIT件数: {total_hits:,} 件")
+        log("完了!")
+
+    finally:
+        # プログラム終了時に Tor プロセスをすべて強制終了
+        try:
+            #log("Torプロセスを終了します")
+            for proc in psutil.process_iter(attrs=['pid', 'name']):
+                if proc.info['name'] and 'tor.exe' in proc.info['name'].lower():
+                    proc.kill()
+                    log(f"Torプロセス (PID: {proc.info['pid']}) を強制終了しました")
         except Exception as e:
-            log(f"致命的エラー: {e}")
+            log(f"Torプロセス終了エラー: {e}")
 
-
-    end_time = datetime.now()
-    duration = (end_time - start_time).total_seconds()
-    total_checked = len(accessed)
-    total_hits = len(results)
-
-    log(f"\n==============実行統計==============")
-    log(f"開始時刻: {start_time.strftime('%Y-%m-%d %H:%M:%S')}")
-    log(f"終了時刻: {end_time.strftime('%Y-%m-%d %H:%M:%S')}")
-    log(f"処理時間: {duration:.2f} 秒（約 {duration / 60:.1f} 分）")
-    # log(f"処理件数: {total_checked:,} 件")
-    log(f"HIT件数: {total_hits:,} 件")
-
-    log(f"完了!")
-    # if duration > 0:
-        # log(f"平均処理速度: {total_checked / duration:.2f} 件/秒")
-
-
+# Pythonスクリプトとして直接実行された場合にmain()を呼び出す
 if __name__ == '__main__':
     asyncio.run(main())
+
