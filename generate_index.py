@@ -13,7 +13,7 @@ output_dir = 'indexes_folder'
 os.makedirs(output_dir, exist_ok=True)
 
 # 1ファイルに書き込む件数
-chunk_size = 30000
+chunk_size = 100000
 
 # 全組み合わせを辞書順で生成
 combinations = itertools.product(chars, repeat=5)

@@ -19,6 +19,7 @@ import requests
 from requests.exceptions import RequestException
 import subprocess
 import psutil
+import random
 
 # ログ出力関数（flush=True により即時反映される）
 def log(*args, **kwargs):
@@ -30,6 +31,11 @@ def log(*args, **kwargs):
             safe_args.append(arg)
     print(*safe_args, **kwargs, flush=True)
 
+# 使用可能プロキシサーバ一覧読み込み関数
+def load_proxies(path='available_proxies.txt'):
+    with open(path, 'r', encoding='utf-8') as f:
+        return [line.strip() for line in f if line.strip()]
+
 
 # 引数処理（--csv と --mode を受け取る）
 parser = argparse.ArgumentParser(description="LivePocket URL Checker")
@@ -40,7 +46,7 @@ csv_file = args.csv
 mode = args.mode
 
 # 非同期HTTPクライアントの最大同時リクエスト数
-CONCURRENT_REQUESTS = 10
+CONCURRENT_REQUESTS = 50
 
 # 保存ディレクトリ設定
 SAVE_DIR = 'save'  # アクセス済みURLのログ
@@ -73,6 +79,9 @@ TOR_PROXY = {
     'http': 'socks5h://127.0.0.1:9050',
     'https': 'socks5h://127.0.0.1:9050'
 }
+    
+# 通常アクセス用のプロキシ設定
+PROXY = load_proxies()
 
 # CSVインデックス読み込み関数
 def load_indexs(path):
@@ -85,7 +94,10 @@ def load_json(path):
     # ファイルが存在する場合、JSONデータを読み込んで返す
     if os.path.exists(path):
         with open(path, 'r', encoding='utf-8') as f:
-            return json.load(f)
+            try:
+                return json.load(f)
+            except json.JSONDecodeError:
+                return []
     return []
 
 # JSONファイル保存関数（非同期）
@@ -102,10 +114,10 @@ def process_tor(index, auto_mode=False, timeout=30):
         response = requests.get(url, headers=headers, proxies=TOR_PROXY, timeout=timeout)
         if response.status_code == 200:
             html = response.text
-            # タイトル待機ループ（最大30秒）
+            # タイトル待機ループ（最大60秒）
             soup = BeautifulSoup(html, 'html.parser')
             title = ''
-            max_wait = 30
+            max_wait = 60
             elapsed = 0
             while not soup.title and elapsed < max_wait:
                 time.sleep(1)
@@ -115,7 +127,7 @@ def process_tor(index, auto_mode=False, timeout=30):
             if soup.title:
                 title = soup.title.get_text(strip=True)
                 
-            #log(title)  # デバッグ
+            log(f"Tor : アクセス先 {url} \n タイトル : {title}")  # デバッグ用
             # アクセス制限ワードを含むかチェック
             if any(b in title for b in block_keywords):
                 log(f"アクセス制限検出: {url}")
@@ -137,7 +149,9 @@ async def process_http(index, session, semaphore, auto_mode):
     async with semaphore:
         log(f"アクセス中 (通常): {url}")
         try:
-            async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as response:
+            # プロキシサーバをランダムで選びそれで大量にアクセスすることによって制限をかかりにくくする
+            proxy = random.choice(PROXY)
+            async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=30), proxy=f"http://{proxy}") as response:
                 if response.status == 200:
                     html = await response.text(errors='ignore')
                     # タイトル待機ループ（最大30秒）
@@ -153,7 +167,7 @@ async def process_http(index, session, semaphore, auto_mode):
                     if soup.title:
                         title = soup.title.get_text(strip=True)
                         
-                    #log(title)  # デバッグ
+                    log(f"{proxy} : アクセス先 {url} \n タイトル : {title}")  # デバッグ用
                     if any(b in title for b in block_keywords):
                         log(f"アクセス制限検出: {url}")
                         if not auto_mode:
@@ -164,7 +178,44 @@ async def process_http(index, session, semaphore, auto_mode):
                         log("HIT", title, url)
                         return index, True, title
         except Exception as e:
-            log(f"[警告] 通常接続エラー: {e}")
+            log(f"[警告] {proxy} 通常接続エラー: {e}")
+            # 警告が出たproxyは除外
+            if proxy in PROXY:
+                PROXY.remove(proxy)
+                log(f"アドレス : {proxy}を除外しました")
+            #警告がでたので仕方がないのでプロキシなしで再度実行
+            try:
+                log(f"通常接続エラーが出たので、プロキシなしで再試行します")
+                async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as response:
+                    if response.status == 200:
+                        html = await response.text(errors='ignore')
+                        # タイトル待機ループ（最大30秒）
+                        soup = BeautifulSoup(html, 'html.parser')
+                        title = ''
+                        max_wait = 30
+                        elapsed = 0
+                        while not soup.title and elapsed < max_wait:
+                            time.sleep(1)
+                            elapsed += 1
+                            soup = BeautifulSoup(html, 'html.parser')
+
+                        if soup.title:
+                            title = soup.title.get_text(strip=True)
+                            
+                        log(f"{proxy} : アクセス先 {url} \n タイトル : {title}")  # デバッグ用
+                        if any(b in title for b in block_keywords):
+                            log(f"アクセス制限検出: {url}")
+                            if not auto_mode:
+                                log("[GUI_WAIT_300]")
+                                await asyncio.sleep(300)
+                            return index, False, title
+                        if any(k in title for k in keywords):
+                            log("HIT", title, url)
+                            return index, True, title
+            except Exception as e:
+                #ここのエラーもうは知らん
+                log(f"もう知らない.....")
+
     return index, True, None
 
 # メイン関数
@@ -207,14 +258,14 @@ async def main():
                 log("[警告] Tor 実行ファイルが見つかりません: tor/tor/tor.exe")
 
         if tor_mode:
-            for index in pending:
-                success, title = process_tor(index, auto_mode, timeout=30)
-                accessed.add(index)
-                if title:
-                    results.append({'url': BASE_URL + index, 'title': title})
+            for idx in pending:
+                success, title = process_tor(idx, auto_mode, timeout=30)
+                accessed.add(idx)
+                if title and any(k in title for k in keywords):
+                    results.append({'url': BASE_URL + idx, 'title': title})
                 with open(ACCESSED_FILE, 'w', encoding='utf-8') as f:
                     json.dump(list(accessed), f, ensure_ascii=False, indent=2)
-                if results:
+                if results and results:
                     with open(RESULT_FILE, 'w', encoding='utf-8') as f:
                         json.dump(results, f, ensure_ascii=False, indent=2)
 
@@ -237,7 +288,7 @@ async def main():
                     if auto_mode and use_tor:
                         for idx in chunk:
                             success, title = process_tor(idx, auto_mode, timeout=30)
-                            if title:
+                            if title and any(k in title for k in keywords):
                                 results.append({'url': BASE_URL + idx, 'title': title})
                             if success:
                                 accessed.add(idx)
@@ -250,7 +301,7 @@ async def main():
                         tasks = [process_http(idx, session, semaphore, auto_mode) for idx in chunk]
                         results_batch = await asyncio.gather(*tasks)
                         for idx, success, title in results_batch:
-                            if title:
+                            if title and any(k in title for k in keywords):
                                 results.append({'url': BASE_URL + idx, 'title': title})
                             if success:
                                 accessed.add(idx)
@@ -261,7 +312,7 @@ async def main():
                                 switch_mode = True
 
                     await save_json(ACCESSED_FILE, list(accessed))
-                    if results:
+                    if results and results:
                         await save_json(RESULT_FILE, results)
 
                     if auto_mode and switch_mode and retry_queue:
@@ -272,7 +323,7 @@ async def main():
                             else:
                                 retry_result = await process_http(retry_index, session, semaphore, auto_mode)
                                 retry_index, success, title = retry_result
-                            if title:
+                            if title and any(k in title for k in keywords):
                                 results.append({'url': BASE_URL + retry_index, 'title': title})
                             if success:
                                 accessed.add(retry_index)
