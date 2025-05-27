@@ -36,8 +36,8 @@ ACCESSED_FILE = os.path.join(SAVE_DIR, 'accessed_url.json')
 BASE_URL = 'https://t.livepocket.jp/e/'
 
 # アクセス設定
-CONCURRENT_REQUESTS = 10 # タスク数
-RATE_LIMIT_PER_SEC = 5 # 通常モードは1秒に"RATE_LIMIT_PER_SEC"件まで
+CONCURRENT_REQUESTS = 3 # タスク数
+RATE_LIMIT_PER_SEC = 3 # 通常モードは1秒に"RATE_LIMIT_PER_SEC"件まで
 BURST_INTERVAL_SEC = 100000 # バーストモード発動までのインターバル秒数(バーストモードいらなくね？)
 BURST_SIZE = 10 # バーストモード時の最大アクセス数
 
@@ -175,7 +175,7 @@ async def main():
         except Exception as e:
             log(f"致命的エラー: {e}")
 
-    log(f"完了!")
+
     end_time = datetime.now()
     duration = (end_time - start_time).total_seconds()
     total_checked = len(accessed)
@@ -187,6 +187,8 @@ async def main():
     log(f"処理時間: {duration:.2f} 秒（約 {duration / 60:.1f} 分）")
     # log(f"処理件数: {total_checked:,} 件")
     log(f"HIT件数: {total_hits:,} 件")
+
+    log(f"完了!")
     # if duration > 0:
         # log(f"平均処理速度: {total_checked / duration:.2f} 件/秒")
 

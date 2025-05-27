@@ -9,7 +9,7 @@ from tkinter import ttk
 class LivePocketGUI:
     def __init__(self, root):
         self.root = root
-        self.root.title("Pokemon LivePocket URL Checker")
+        self.root.title("LivePocket URL Checker")
         self.csv_path = tk.StringVar()
 
         # ファイル選択
@@ -86,14 +86,13 @@ class LivePocketGUI:
     def resume_from_pause(self):
         self.status_label.config(text="⏳ 実行中...", fg='orange')
         self.progress.start()
-        self.timer_running = True
         self.pause = False
         self.pause_log = False
 
     def run_async_task(self, csv_file):
         script_path = os.path.abspath("Pokemon_LivePocket_URL_Checker.py")
         if not os.path.exists(script_path):
-            self.log.insert(tk.END, f"❌ Pokemon_LivePocket_URL_Checker.py が見つかりません\n")
+            self.log.insert(tk.END, f"❌ スクリプトが見つかりません\n")
             self.status_label.config(text="❌ スクリプトが見つかりません", fg='red')
             self.timer_running = False
             self.progress.stop()
@@ -108,7 +107,6 @@ class LivePocketGUI:
                 if "[GUI_WAIT_300]" in line:
                     self.status_label.config(text="⏸ サイト制限待機中...", fg='purple')
                     self.progress.stop()
-                    # self.timer_running = False
                     self.pause = True
                     self.pause_log = True
                     self.root.after(300000, self.resume_from_pause)
@@ -120,14 +118,20 @@ class LivePocketGUI:
 
                 if "HIT" in line:
                     self.status_label.config(text="✨ HIT 検出", fg='green')
-                    self.root.after(5000, lambda: self.status_label.config(text="⏳ 実行中...", fg='orange'))
+                    def revert_status():
+                        current = self.status_label.cget("text")
+                        if "完了" not in current and "停止" not in current and "エラー" not in current:
+                            self.status_label.config(text="⏳ 実行中...", fg='orange')
+                    self.root.after(5000, revert_status)
+
                 elif "完了" in line:
                     self.status_label.config(text="✅ 完了", fg='green')
+
             self.process.wait()
             if self.process.returncode == 0:
                 self.status_label.config(text="✅ スキャン完了", fg='green')
             else:
-                self.status_label.config(text="⏹ 停止", fg='red')
+                self.status_label.config(text="❌ エラーが発生しました", fg='red')
         except Exception as e:
             self.log.insert(tk.END, f"❌ 実行エラー: {e}\n")
             self.status_label.config(text="❌ 実行失敗", fg='red')
