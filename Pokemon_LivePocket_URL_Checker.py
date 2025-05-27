@@ -46,7 +46,7 @@ csv_file = args.csv
 mode = args.mode
 
 # 非同期HTTPクライアントの最大同時リクエスト数
-CONCURRENT_REQUESTS = 50
+CONCURRENT_REQUESTS = 20
 
 # 保存ディレクトリ設定
 SAVE_DIR = 'save'  # アクセス済みURLのログ
@@ -202,7 +202,7 @@ async def process_http(index, session, semaphore, auto_mode):
                         if soup.title:
                             title = soup.title.get_text(strip=True)
                             
-                        log(f"{proxy} : アクセス先 {url} \n タイトル : {title}")  # デバッグ用
+                        log(f"再試行アクセス → {url} \n タイトル : {title}")  # デバッグ用
                         if any(b in title for b in block_keywords):
                             log(f"アクセス制限検出: {url}")
                             if not auto_mode:
