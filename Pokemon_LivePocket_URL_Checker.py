@@ -22,7 +22,14 @@ import psutil
 
 # ログ出力関数（flush=True により即時反映される）
 def log(*args, **kwargs):
-    print(*args, **kwargs, flush=True)
+    safe_args = []
+    for arg in args:
+        if isinstance(arg, str):
+            safe_args.append(arg.encode('cp932', errors='replace').decode('cp932'))
+        else:
+            safe_args.append(arg)
+    print(*safe_args, **kwargs, flush=True)
+
 
 # 引数処理（--csv と --mode を受け取る）
 parser = argparse.ArgumentParser(description="LivePocket URL Checker")
@@ -88,15 +95,27 @@ async def save_json(path, data):
         await f.write(json.dumps(data, ensure_ascii=False, indent=2))
 
 # Tor経由で単一URLにアクセスする処理（同期）
-def process_tor(index, auto_mode):
+def process_tor(index, auto_mode=False, timeout=30):
     url = BASE_URL + index
     log(f"アクセス中 (Tor): {url}")
     try:
-        response = requests.get(url, headers=headers, proxies=TOR_PROXY, timeout=30)
+        response = requests.get(url, headers=headers, proxies=TOR_PROXY, timeout=timeout)
         if response.status_code == 200:
             html = response.text
+            # タイトル待機ループ（最大30秒）
             soup = BeautifulSoup(html, 'html.parser')
-            title = soup.title.get_text(strip=True) if soup.title else ''
+            title = ''
+            max_wait = 30
+            elapsed = 0
+            while not soup.title and elapsed < max_wait:
+                time.sleep(1)
+                elapsed += 1
+                soup = BeautifulSoup(html, 'html.parser')
+
+            if soup.title:
+                title = soup.title.get_text(strip=True)
+                
+            #log(title)  # デバッグ
             # アクセス制限ワードを含むかチェック
             if any(b in title for b in block_keywords):
                 log(f"アクセス制限検出: {url}")
@@ -121,8 +140,20 @@ async def process_http(index, session, semaphore, auto_mode):
             async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=10)) as response:
                 if response.status == 200:
                     html = await response.text(errors='ignore')
+                    # タイトル待機ループ（最大30秒）
                     soup = BeautifulSoup(html, 'html.parser')
-                    title = soup.title.get_text(strip=True) if soup.title else ''
+                    title = ''
+                    max_wait = 30
+                    elapsed = 0
+                    while not soup.title and elapsed < max_wait:
+                        time.sleep(1)
+                        elapsed += 1
+                        soup = BeautifulSoup(html, 'html.parser')
+
+                    if soup.title:
+                        title = soup.title.get_text(strip=True)
+                        
+                    #log(title)  # デバッグ
                     if any(b in title for b in block_keywords):
                         log(f"アクセス制限検出: {url}")
                         if not auto_mode:
@@ -177,7 +208,7 @@ async def main():
 
         if tor_mode:
             for index in pending:
-                success, title = process_tor(index, auto_mode)
+                success, title = process_tor(index, auto_mode, timeout=30)
                 accessed.add(index)
                 if title:
                     results.append({'url': BASE_URL + index, 'title': title})
@@ -205,7 +236,7 @@ async def main():
 
                     if auto_mode and use_tor:
                         for idx in chunk:
-                            success, title = process_tor(idx, auto_mode)
+                            success, title = process_tor(idx, auto_mode, timeout=30)
                             if title:
                                 results.append({'url': BASE_URL + idx, 'title': title})
                             if success:
@@ -237,7 +268,7 @@ async def main():
                         log("切り替え後、再試行を実行中...")
                         for retry_index in retry_queue:
                             if use_tor:
-                                success, title = process_tor(retry_index, auto_mode)
+                                success, title = process_tor(retry_index, auto_mode, timeout=30)
                             else:
                                 retry_result = await process_http(retry_index, session, semaphore, auto_mode)
                                 retry_index, success, title = retry_result
