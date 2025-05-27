@@ -7,7 +7,7 @@
 ## ✅ 特徴
 
 - 🎛 GUIでCSV選択・実行・進捗表示
-- 🚀 aiohttp + レート制限による非同期スキャン（通常接続）
+- 🚀 aiohttp + レート制限 + プロキシ経由による非同期スキャン（通常接続）
 - 🛡 Tor接続モード対応（requests + socks5）
 - 🔁 自動切り替えモード搭載（通常↔Torを動的に切替）
 - 💤 アクセス制限検出時に自動で待機し再開
@@ -50,7 +50,7 @@ pip install aiohttp aiofiles beautifulsoup4 requests pysocks
 python generate_index.py
 ```
 
-> `indexes_folder/` に 5文字組合せのCSV（3万件ごと）を分割保存します。
+> `indexes_folder/` に 5文字組合せのCSV（10万件ごと）を分割保存します。
 
 ---
 
@@ -60,8 +60,8 @@ python generate_index.py
 python gui.py
 ```
 
-または `Start.bat` をダブルクリック。  
-非表示起動にしたい場合は `.vbs` を利用。
+または `Pokemon LivePoket URL Checkerの起動.bat` をダブルクリック。  
+
 
 ---
 
