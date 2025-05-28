@@ -151,33 +151,62 @@ async def process_http(index, session, semaphore, auto_mode):
         log(f"アクセス中 (通常): {url}")
         try:
             # プロキシサーバをランダムで選びそれで大量にアクセスすることによって制限をかかりにくくする
-            proxy = random.choice(PROXY)
-            async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=30), proxy=f"http://{proxy}") as response:
-                if response.status == 200:
-                    html = await response.text(errors='ignore')
-                    # タイトル待機ループ（最大30秒）
-                    soup = BeautifulSoup(html, 'html.parser')
-                    title = ''
-                    max_wait = 30
-                    elapsed = 0
-                    while not soup.title and elapsed < max_wait:
-                        time.sleep(1)
-                        elapsed += 1
+            proxy = ""
+            if not PROXY:
+                async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=30)) as response:
+                    if response.status == 200:
+                        html = await response.text(errors='ignore')
+                        # タイトル待機ループ（最大30秒）
                         soup = BeautifulSoup(html, 'html.parser')
+                        title = ''
+                        max_wait = 30
+                        elapsed = 0
+                        while not soup.title and elapsed < max_wait:
+                            time.sleep(1)
+                            elapsed += 1
+                            soup = BeautifulSoup(html, 'html.parser')
 
-                    if soup.title:
-                        title = soup.title.get_text(strip=True)
-                        
-                    log(f"{proxy} : アクセス先 {url} \n タイトル : {title}")  # デバッグ用
-                    if any(b in title for b in block_keywords):
-                        log(f"アクセス制限検出: {url}")
-                        if not auto_mode:
-                            log("[GUI_WAIT_300]")
-                            await asyncio.sleep(300)
-                        return index, False, title
-                    if any(k in title for k in keywords):
-                        log("HIT", title, url)
-                        return index, True, title
+                        if soup.title:
+                            title = soup.title.get_text(strip=True)
+                            
+                        log(f"local : アクセス先 {url} \n タイトル : {title}")  # デバッグ用
+                        if any(b in title for b in block_keywords):
+                            log(f"アクセス制限検出: {url}")
+                            if not auto_mode:
+                                log("[GUI_WAIT_300]")
+                                await asyncio.sleep(300)
+                            return index, False, title
+                        if any(k in title for k in keywords):
+                            log("HIT", title, url)
+                            return index, True, title
+            else:
+                proxy = random.choice(PROXY)
+                async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=30), proxy=f"http://{proxy}") as response:
+                    if response.status == 200:
+                        html = await response.text(errors='ignore')
+                        # タイトル待機ループ（最大30秒）
+                        soup = BeautifulSoup(html, 'html.parser')
+                        title = ''
+                        max_wait = 30
+                        elapsed = 0
+                        while not soup.title and elapsed < max_wait:
+                            time.sleep(1)
+                            elapsed += 1
+                            soup = BeautifulSoup(html, 'html.parser')
+
+                        if soup.title:
+                            title = soup.title.get_text(strip=True)
+                            
+                        log(f"{proxy} : アクセス先 {url} \n タイトル : {title}")  # デバッグ用
+                        if any(b in title for b in block_keywords):
+                            log(f"アクセス制限検出: {url}")
+                            if not auto_mode:
+                                log("[GUI_WAIT_300]")
+                                await asyncio.sleep(300)
+                            return index, False, title
+                        if any(k in title for k in keywords):
+                            log("HIT", title, url)
+                            return index, True, title
         except Exception as e:
             log(f"[警告] {proxy} 通常接続エラー: {e}")
             # 警告が出たproxyは除外
