@@ -113,7 +113,8 @@ def process_tor(index, auto_mode=False, timeout=30):
     try:
         response = requests.get(url, headers=headers, proxies=TOR_PROXY, timeout=timeout)
         if response.status_code == 200:
-            html = response.text
+            # 明示的にUTF-8でデコードして文字化け防止
+            html = response.content.decode('utf-8', errors='ignore')
             # タイトル待機ループ（最大60秒）
             soup = BeautifulSoup(html, 'html.parser')
             title = ''
